@@ -1,5 +1,5 @@
-import React, { useEffect, useState } from 'react';
-import { Canvas, useThree } from '@react-three/fiber';
+import { useEffect, useState, useCallback } from 'react';
+import { Canvas } from '@react-three/fiber';
 import { OrbitControls, PerspectiveCamera, Text } from '@react-three/drei';
 import { EffectComposer, Bloom, Vignette } from '@react-three/postprocessing';
 import { io } from 'socket.io-client';
@@ -59,15 +59,32 @@ export default function HostPage() {
   const [qrImageURL, setQrImageURL] = useState('');
   const [socket, setSocket] = useState(null);
   const [isFinalShow, setIsFinalShow] = useState(false);
+  const [sessions, setSessions] = useState([]);
+  const [sessionError, setSessionError] = useState('');
+
+  const fetchSessions = useCallback(async () => {
+    try {
+      const response = await fetch('/api/sessions?limit=1');
+      if (!response.ok) throw new Error('session_fetch_failed');
+      const data = await response.json();
+      setSessions(Array.isArray(data.sessions) ? data.sessions : []);
+      setSessionError('');
+    } catch {
+      setSessions([]);
+      setSessionError('oturum_bulunamadi');
+    }
+  }, []);
 
   useEffect(() => {
     // Socket Bağlantısı
-    const socketUrl = window.location.protocol + "//" + window.location.hostname + ":3003";
+    const socketUrl = `${window.location.protocol}//${window.location.hostname}:3003`;
     const newSocket = io(socketUrl, {
       transports: ['polling', 'websocket'],
       upgrade: true
     });
     setSocket(newSocket);
+
+    fetchSessions();
 
     // Sunucu IP Dinleme
     newSocket.on('server-ip', ({ ip }) => {
@@ -82,11 +99,24 @@ export default function HostPage() {
       setQrImageURL(qrUrl);
     });
 
+    newSocket.on('carpet-reset', () => {
+      setTimeout(() => {
+        fetchSessions();
+      }, 500);
+    });
+
     return () => {
       newSocket.off('server-ip');
+      newSocket.off('carpet-reset');
       newSocket.close();
     };
-  }, []);
+  }, [fetchSessions]);
+
+  const latestSession = sessions[0];
+  const sessionDownloadUrl = latestSession ? `${window.location.origin}/api/sessions/${latestSession.id}/download` : '';
+  const sessionQrUrl = latestSession
+    ? `https://api.qrserver.com/v1/create-qr-code/?size=150x150&data=${encodeURIComponent(sessionDownloadUrl)}`
+    : '';
 
   return (
     <div style={{ width: '100vw', height: '100vh', background: '#1a1a1a' }}>
@@ -206,7 +236,7 @@ export default function HostPage() {
       </Canvas>
 
       {/* UI BUTONLARI */}
-      <button onClick={() => { setShowQR(!showQR); initAudio(); }} style={{
+      <button type="button" onClick={() => { setShowQR(!showQR); initAudio(); }} style={{
         position: 'absolute', top: 20, right: 20, background: showQR ? 'rgba(255,255,255,0.2)' : 'rgba(0,0,0,0.6)',
         backdropFilter: 'blur(5px)', border: '1px solid rgba(255,255,255,0.2)', color: 'white', padding: '12px 24px',
         borderRadius: '30px', cursor: 'pointer', fontWeight: 'bold', fontSize: '14px', transition: 'all 0.3s ease',
@@ -215,7 +245,7 @@ export default function HostPage() {
         <span style={{ fontSize: '18px' }}>🎵 / 📱</span> {showQR ? 'Kapat' : 'Başlat / Katıl'}
       </button>
 
-      <button onClick={() => { if (window.confirm('Tüm mozaikler silinecek. Emin misiniz?')) { if (socket) socket.emit('manual-reset'); } }} style={{
+      <button type="button" onClick={() => { if (window.confirm('Tüm mozaikler silinecek. Emin misiniz?')) { if (socket) socket.emit('manual-reset'); } }} style={{
         position: 'absolute', top: 70, right: 20, background: 'rgba(255, 50, 50, 0.2)', backdropFilter: 'blur(5px)',
         border: '1px solid rgba(255, 50, 50, 0.3)', color: '#ffcccc', padding: '10px 20px', borderRadius: '30px',
         cursor: 'pointer', fontWeight: 'bold', fontSize: '13px', transition: 'all 0.3s ease', zIndex: 100,
@@ -230,7 +260,7 @@ export default function HostPage() {
         transform: showQR ? 'translateY(0)' : 'translateY(-20px)', transition: 'all 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275)',
         background: 'rgba(0,0,0,0.85)', backdropFilter: 'blur(10px)', padding: '15px', borderRadius: '16px',
         border: '1px solid rgba(255,255,255,0.1)', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '10px',
-        color: 'white', fontFamily: 'sans-serif', boxShadow: '0 10px 30px rgba(0,0,0,0.5)', width: '160px'
+        color: 'white', fontFamily: 'sans-serif', boxShadow: '0 10px 30px rgba(0,0,0,0.5)', width: '190px'
       }}>
         <div style={{ width: '130px', height: '130px', background: 'white', borderRadius: '8px', padding: '5px', boxSizing: 'border-box' }}>
           {qrImageURL && <img src={qrImageURL} alt="QR Kod" style={{ width: '100%', height: '100%', display: 'block' }} />}
@@ -238,6 +268,20 @@ export default function HostPage() {
         <div style={{ textAlign: 'center' }}>
           <p style={{ margin: 0, fontSize: '14px', fontWeight: 'bold', color: '#ffd700' }}>TARA & KATIL</p>
           <p style={{ margin: '4px 0 0', fontSize: '11px', opacity: 0.6, lineHeight: '1.4' }}>Aynı Wi-Fi ağında<br />olduğunuzdan emin olun</p>
+        </div>
+        <div style={{ width: '100%', height: '1px', background: 'rgba(255,255,255,0.08)', margin: '6px 0' }} />
+        <div style={{ textAlign: 'center', width: '100%' }}>
+          <p style={{ margin: 0, fontSize: '12px', fontWeight: '700', color: '#ffd700' }}>SON OTURUM</p>
+          {latestSession ? (
+            <>
+              <div style={{ width: '130px', height: '130px', background: 'white', borderRadius: '8px', padding: '5px', boxSizing: 'border-box', margin: '8px auto 6px' }}>
+                <img src={sessionQrUrl} alt="Oturum QR" style={{ width: '100%', height: '100%', display: 'block' }} />
+              </div>
+              <a href={sessionDownloadUrl} style={{ color: '#fff', fontSize: '11px', textDecoration: 'underline' }}>Oturumu indir (JSON)</a>
+            </>
+          ) : (
+            <p style={{ margin: '6px 0 0', fontSize: '11px', opacity: 0.6 }}>{sessionError ? 'Oturum bulunamadı' : 'Henüz oturum yok'}</p>
+          )}
         </div>
       </div>
     </div>

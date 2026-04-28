@@ -9,6 +9,7 @@ import os from 'os';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const DATA_FILE = path.join(__dirname, 'carpet_data.json');
+const MAX_SESSIONS = 100;
 
 // 🌐 YEREL IP TESPİTİ
 function getLocalIp() {
@@ -49,6 +50,9 @@ const TOTAL_SLOTS = 60;
 const PIXELS_PER_SLOT = 16;
 let availableSlots = Array.from({ length: TOTAL_SLOTS }, (_, i) => i);
 let carpetState = Array(TOTAL_SLOTS).fill(null).map(() => Array(PIXELS_PER_SLOT * PIXELS_PER_SLOT).fill('#9c8d76'));
+let sessions = [];
+let currentSessionMotifs = [];
+let sessionStartedAt = null;
 
 // 💾 VERİ YÜKLEME (Başlangıçta)
 function loadData() {
@@ -60,6 +64,15 @@ function loadData() {
         carpetState = data.carpetState;
         availableSlots = data.availableSlots;
         console.log('💾 Kayıtlı halı verisi yüklendi!');
+      }
+      if (Array.isArray(data.sessions)) {
+        sessions = data.sessions;
+      }
+      if (Array.isArray(data.currentSessionMotifs)) {
+        currentSessionMotifs = data.currentSessionMotifs;
+      }
+      if (data.sessionStartedAt) {
+        sessionStartedAt = data.sessionStartedAt;
       }
     } catch (e) {
       console.error('Veri yükleme hatası:', e);
@@ -74,7 +87,7 @@ function saveData() {
   if (saveTimeout) clearTimeout(saveTimeout);
   saveTimeout = setTimeout(() => {
     try {
-      const data = { carpetState, availableSlots };
+      const data = { carpetState, availableSlots, sessions, currentSessionMotifs, sessionStartedAt };
       fs.writeFileSync(DATA_FILE, JSON.stringify(data));
       // console.log('💾 Veri diskte güncellendi.'); // Log kirliliği olmaması için kapalı
     } catch (e) {
@@ -82,6 +95,82 @@ function saveData() {
     }
   }, 2000);
 }
+
+function createSessionId() {
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function countFilledSlots() {
+  return TOTAL_SLOTS - availableSlots.length;
+}
+
+function recordMotif(slotId, pixels) {
+  if (!sessionStartedAt) sessionStartedAt = new Date().toISOString();
+  currentSessionMotifs.push({
+    id: createSessionId(),
+    slotId,
+    pixels,
+    createdAt: new Date().toISOString()
+  });
+}
+
+function createSessionArchive(reason) {
+  const filledSlots = countFilledSlots();
+  if (filledSlots === 0 && currentSessionMotifs.length === 0) return null;
+  const createdAt = new Date().toISOString();
+  const session = {
+    id: createSessionId(),
+    createdAt,
+    startedAt: sessionStartedAt || createdAt,
+    reason,
+    filledSlots,
+    totalSlots: TOTAL_SLOTS,
+    percent: Math.round((filledSlots / TOTAL_SLOTS) * 100),
+    motifs: currentSessionMotifs,
+    carpetState: JSON.parse(JSON.stringify(carpetState))
+  };
+  sessions.push(session);
+  if (sessions.length > MAX_SESSIONS) {
+    sessions = sessions.slice(-MAX_SESSIONS);
+  }
+  currentSessionMotifs = [];
+  sessionStartedAt = null;
+  saveData();
+  return session;
+}
+
+app.get('/api/sessions', (req, res) => {
+  const limit = Math.max(1, Math.min(50, parseInt(req.query.limit || '10', 10)));
+  const list = sessions
+    .slice()
+    .reverse()
+    .slice(0, limit)
+    .map(({ id, createdAt, startedAt, reason, filledSlots, totalSlots, percent }) => ({
+      id,
+      createdAt,
+      startedAt,
+      reason,
+      filledSlots,
+      totalSlots,
+      percent
+    }));
+  res.json({ sessions: list });
+});
+
+app.get('/api/sessions/:id', (req, res) => {
+  const session = sessions.find((item) => item.id === req.params.id);
+  if (!session) return res.status(404).json({ error: 'session_not_found' });
+  res.json(session);
+});
+
+app.get('/api/sessions/:id/download', (req, res) => {
+  const session = sessions.find((item) => item.id === req.params.id);
+  if (!session) return res.status(404).send('session_not_found');
+  const fileName = `hali-mozaik-session-${session.id}.json`;
+  res.setHeader('Content-Type', 'application/json');
+  res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
+  res.send(JSON.stringify(session));
+});
 
 // 🚀 PERFORMANS: Update Batching (50ms)
 let updateBuffer = [];
@@ -125,6 +214,7 @@ io.on('connection', (socket) => {
   socket.on('pixel-data', (pixels) => {
     if (availableSlots.length === 0) {
       console.log('🔄 Halı doldu! SIFIRLAMA GÖNDERİLİYOR...');
+      createSessionArchive('auto');
       io.emit('carpet-reset');
       availableSlots = Array.from({ length: TOTAL_SLOTS }, (_, i) => i);
       carpetState = Array(TOTAL_SLOTS).fill(null);
@@ -136,11 +226,9 @@ io.on('connection', (socket) => {
     const targetSlot = availableSlots[randomIndex];
     availableSlots.splice(randomIndex, 1);
     carpetState[targetSlot] = pixels;
+    recordMotif(targetSlot, pixels);
 
     saveData(); // Değişikliği kaydet
-
-    const filledSlots = TOTAL_SLOTS - availableSlots.length;
-    const progressPercent = Math.round((filledSlots / TOTAL_SLOTS) * 100);
 
     // 🚀 Buffer'a ekle (Anında göndermek yerine)
     updateBuffer.push({ slotId: targetSlot, pixels: pixels });
@@ -152,6 +240,7 @@ io.on('connection', (socket) => {
 
   socket.on('manual-reset', () => {
     console.log('🧹 MANUEL TEMİZLİK EMRİ GELDİ!');
+    createSessionArchive('manual');
     io.emit('carpet-reset');
     availableSlots = Array.from({ length: TOTAL_SLOTS }, (_, i) => i);
     carpetState = Array(TOTAL_SLOTS).fill(null).map(() => Array(PIXELS_PER_SLOT * PIXELS_PER_SLOT).fill('#9c8d76'));
